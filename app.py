@@ -1,16 +1,15 @@
-from fastapi import FastAPI, UploadFile, File
-from fastapi import Depends, Header, HTTPException
+from fastapi import FastAPI, UploadFile, File, Body, HTTPException, Depends, Header
 from fastapi.responses import JSONResponse
 import numpy as np
 import os
 import tempfile
 import sys
 import uvicorn
+import requests
+from typing import Optional
+from pydantic import BaseModel
 
 from predict_utils import predict_from_file
-
-from dotenv import load_dotenv
-load_dotenv()  # loads variables from .env
 
 # Create FastAPI app
 app = FastAPI(
@@ -19,18 +18,16 @@ app = FastAPI(
     version="1.0"
 )
 
-# API KEY VERIFICATION
-def verify_api_key(x_api_key: str = Header(None)):
-    server_key = os.getenv("API_KEY")
-
-    if server_key is None:
-        raise HTTPException(status_code=500, detail="API key not configured on server")
-
-    if x_api_key != server_key:
-        raise HTTPException(status_code=401, detail="Invalid or missing API key")
-
+# ============ API Key Verification ============
+async def verify_api_key(x_api_key: str = Header(None)):
+    valid_key = "e221fb9af59ebdbcde7a8e14c59fac51826bdade64cc3663837e792c22919960"
+    if x_api_key != valid_key:
+        raise HTTPException(status_code=403, detail="Invalid API key")
     return True
 
+# ============ Request Body Models ============
+class AudioURLRequest(BaseModel):
+    audio_url: str
 
 # ============ API Endpoints ============
 @app.get("/")
@@ -64,24 +61,33 @@ def info():
         "model": "Random Forest Classifier (50 trees)"
     }
 
-
 @app.post("/predict")
 async def predict(
-        file: UploadFile = File(...),
-        _verify: bool = Depends(verify_api_key)
-    ):
+    request: AudioURLRequest = Body(...),
+    _verify: bool = Depends(verify_api_key)
+):
     temp_file = None
     try:
-        # Save uploaded file temporarily
-        suffix = os.path.splitext(file.filename)[1] or ".wav"
+        audio_url = request.audio_url
+        
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            response = requests.get(audio_url, headers=headers, timeout=15)
+            response.raise_for_status()
+            audio_content = response.content
+        except requests.exceptions.RequestException as e:
+            raise HTTPException(status_code=400, detail=f"Download failed: {str(e)}")
+
+        suffix = ".mp3"
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(await file.read())
+            tmp.write(audio_content)
             temp_file = tmp.name
+        filename = audio_url.split("/")[-1]
 
         result = predict_from_file(temp_file)
 
         return {
-            "filename": file.filename,
+            "filename": filename,
             "prediction": result["label"],
             "confidence": f"{result['confidence'] * 100:.2f}%",
             "confidence_score": result["confidence"],
@@ -95,7 +101,47 @@ async def predict(
             content={"error": f"Failed to process audio: {str(e)}"}
         )
     finally:
-        # Clean up temporary file
+        if temp_file and os.path.exists(temp_file):
+            try:
+                os.remove(temp_file)
+            except:
+                pass
+
+@app.post("/predict-upload")
+async def predict_upload(
+    file: UploadFile = File(...),
+    _verify: bool = Depends(verify_api_key)
+):
+    temp_file = None
+    try:
+        # CASE 1 — Audio File Upload
+        if file is not None:
+            suffix = os.path.splitext(file.filename)[1] or ".mp3"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(await file.read())
+                temp_file = tmp.name
+            filename = file.filename
+
+        else:
+            raise HTTPException(status_code=400, detail="No file provided")
+
+        result = predict_from_file(temp_file)
+
+        return {
+            "filename": filename,
+            "prediction": result["label"],
+            "confidence": f"{result['confidence'] * 100:.2f}%",
+            "confidence_score": result["confidence"],
+            "probabilities": result["probabilities"]
+        }
+
+    except Exception as e:
+        print(f"Prediction error: {e}", file=sys.stderr)
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Failed to process audio: {str(e)}"}
+        )
+    finally:
         if temp_file and os.path.exists(temp_file):
             try:
                 os.remove(temp_file)
