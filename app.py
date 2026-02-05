@@ -71,7 +71,7 @@ def info():
         "model": "Random Forest Classifier (50 trees)"
     }
 
-@app.post("/predict")
+@app.post("/api/voice-detection")
 async def predict(
     request: AudioRequest = Body(...),
     _verify: bool = Depends(verify_api_key)
